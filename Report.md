@@ -41,7 +41,13 @@ VICTORY_SCORE = 30
 
 ### Results
 
+Training result
+
 ![Trained Agent](plots/scores.png)
+
+Training result without the two separate memories. Scores do not meaningfully improve.
+
+![Trained Agent](plots/ScoresSingleMem.png)
 
 
 ### Improvements
