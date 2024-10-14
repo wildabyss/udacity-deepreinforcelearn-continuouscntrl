@@ -1,66 +1,51 @@
-## Project 1: Navigation Report
+## Project 2: Continuous Control Report
 
 ### Algorithm
 
-The project uses deep reinforcement learning to train an agent that solves the Unity Banana Collector game. It leverages the Deep Q-Network (DQN) method, whereby the action value function is modeled by a feedforward neural network with one hidden layer. The input layer takes in the state vector and, the output layer is a linear layer outputting the state-action values. In evaluation, the action with the highest state-action value as predicted by the model is chosen as the next action given the current observed state.
+The project uses deep reinforcement learning to train an agent that solves the Unity Reacher game. It leverages the Deep Deterministic Policy Gradient (DDPG) method to solve the continuous-action space game. The method consists of a Critic, which learns the optimal action-value function of the game, and an Actor, which selects the action corresponding to the global maximum of the action-value corresponding to the current state. DDPG is an extension of DQN in that, rather than using argmax to select the discrete optimal action from the optimal action-value function, it uses a learning-based optimizer.
 
-The learning algorithm keeps two sets of models. One is called the local model and is used to generate the current state action-value and participate in back-propagation; its weights are updated in every learn iteration. The second is called the target model and is used to infer the Temporal Difference (TD) target; its weights are updated at a slower rate than the local model, subject to hyperparameter calibration. The separation of the TD target from the current action-value prediction is to stabilize the DQN as a whole.
+Each Actor and Critic consists of a local and target feedforward neural network, whereby the local networks are used to generate the immediate action and action-value, and the target networks are used in training to generate the target values in TD error. The local weights are updated per training step, and the target weights linearly blend in the local weights through a hyperparameter SOFT_UPDATE_RATE.
 
-A separate Double Q-Learning method is also implemented, whereby the action chosen for the TD target uses the local model and the TD target action-value estimation uses the target model. This is called Double Q-Learning.
+A few improvements were made on top of the vanilla DDPG to incentivize and stabilize the training:
 
-Instead of using the most recent set of state-action-reward-next state to perform the learn, DQN has a Replay Buffer whereby the sequence is first stored in the buffer. During learn, a batch of sequences is chosen at random from the buffer. The Replay Buffer is FIFO circular.
+1. The Ornstein-Uhlenbeck (OU) noise is added to the actions during training to allow exploration. I used a Gaussian noise in the OU process model so that even large noise actions have a non-zero chance of getting picked, however small the standard deviation is. The annealing process during training simply involves decreasing the standard deviation (sigma) toward the desired minimum value.
 
-If prioritized replay is enabled, the random choosing of the replay batch is weighted by the absolute TD error when the sequence is first added.
+2. At start of training, the vast majority of the experience tuples will be meaningless jitters in the robotic arms, and only a very small number would be ones corresponding to posive rewards. As a result, it is likely there will not be a single positive reward tuple in a given randomly selected batch. Experimentation has shown that needs leads to very slow learn where the scores do not meaningfully improve. I modified the replay buffer to have two separate memories, one corresponding to bad experiences where no positive reward was obtained, and the other corresponding to good experiences where positive reward was obtained. In each learning step, at least GOOD_MEM_RATIO of the sampled experience tuples must be from good experiences.
+
+3. To avoid score crashing half way through training, the training step is only ran once every two time steps.
 
 ### Hyperparameters
 
 The following hyper-parameters have been shown to work well during training.
 
-# Global hyperparameters
+REPLAY_BUFFER_SIZE = int(1e6)   # replay buffer size
+REPLAY_BATCH_SIZE = 120         # minibatch size
+FUTURE_DISCOUNT = 0.99          # discount factor
+SOFT_UPDATE_RATE = 1e-3         # soft update rate
+LR_ACTOR = 1e-4                 # learning rate of the actor 
+LR_CRITIC = 2e-4                # learning rate of the critic
+WEIGHT_DECAY = 0.0001           # L2 weight decay
 
-BUFFER_SIZE = int(1e5)          # replay buffer size
-BATCH_SIZE = 64                 # replay minibatch size
-GAMMA = 0.99                    # discount factor in TD control
-TAU = 1e-3                      # for soft update of target parameters
-LR = 5e-4                       # learning rate 
-UPDATE_EVERY = 4                # how often to update the network
+USE_TWO_MEMS = True             # Whether to separately sample good vs bad experiences
+GOOD_MEM_RATIO = 0.25           # Good vs bad experience ratio in sampling
+UNIFORM_SAMPLE_MIN_SCORE = 50   # Minimum score above which we revert to sampling good and bad experiences uniformly
 
-EPS_START = 1.0                 # Starting exploration factor
-EPS_END = 0.01                  # Ending exploration factor
-EPS_DECAY = 0.995               # Rate of anealing of exploration factor
+ADD_NOISE = True                # Whether to add OU noise
+NOISE_SIGMA_START = 0.15        # Start of the OU noise standard deviation
+NOISE_SIGMA_DECAY = 0.98        # Decay rate of the OU standard deviation
+NOISE_SIGMA_MIN = 0.001         # Minimum of the OU noise standard deviation
 
-USE_DOUBLE_Q = True             # Whether to use Double DQN
-USE_PRIORITIZED_REPLAY = False  # Whether to use prioritized replay (enabling it can be slow for large BUFFER_SIZE)
-PRIORITIZED_REPLAY_ALPHA = 0.5  # Power to the prioritized replay probability
-
-N_EPISODES = 2000               # Max number of training episodes
-MAX_T = 1000                    # Max number of actions per episode
-VICTORY_SCORE = 20              # Threshold of score's running average for ending training
+N_EPISODES = 1000
+MAX_T = 1000
+VICTORY_SCORE = 30
 
 ### Results
 
-#### DQN vs Double DQN
-
-Double DQN is slightly more stable than DQN and reaches the steady-state score (around 16) faster than DQN.
-
-##### DQN Scores
-
-![DQN Scores](plots/DQNScores.png)
-
-##### Double DQN Scores
-
-![DQN Scores](plots/DoubleDQNScores.png)
-
-#### Prioritized Replay
-
-With prioritized replay, I set the alpha to be 0.5. However, the running time with priority replay enabled is significantly longer as episodes grow and the buffer content increases. Overall, I didn't see any advantage of having prioritized replay enabled for this game. This makes intuitive sense since the most probable sequence is that associated with collecting a blue banana, but to avoid a blue banana is relatively simple compared to collecting a yellow banana.
+![Trained Agent](plots/scores.png)
 
 
 ### Improvements
 
-1. Through trial and error, I found that if the agent is trained starting from a rather sparse corner of the world, it has trouble generalizing the results when it gets to a busy region. The agent becomes unstable and rapidly switches between all the control actions.\
-It would benefit if the seed of the environment can be specified at every reset.
+1. Since an action may not show benefit until many states down the road, it may benefit from storing a horizon of sequences and retrieving the batch in the fixed order.
 
-2. Since an action may not show benefit until many states down the road, it may benefit from storing a horizon of sequences and retrieving the batch in the fixed order.
-
-3. The current reward system only rewards and penalizes when a banana is collected. We can attempt to adjust the reward system by also penalizing the number of actions.
+2. The current reward system only rewards and penalizes when the tip is near the goal location. We can attempt to adjust the reward system by also penalizing the number of actions to minimize jitter.

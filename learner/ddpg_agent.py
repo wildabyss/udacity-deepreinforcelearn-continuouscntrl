@@ -15,7 +15,7 @@ class Agent():
     """Interacts with and learns from the environment."""
     
     def __init__(self, state_size, action_size, random_seed=0, lr_actor=1e-4, lr_critic=1e-4, weight_decay=1e-4, future_discount=0.99,
-                 soft_update_rate=0.001, replay_buffer_size=1e6, replay_batch_size=120,
+                 soft_update_rate=0.001, replay_buffer_size=int(1e6), replay_batch_size=int(120),
                  add_noise=True, use_two_mems=True, good_mem_ratio=0.2):
         """Initialize an Agent object.
         
