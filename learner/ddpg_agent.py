@@ -14,9 +14,9 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Agent():
     """Interacts with and learns from the environment."""
     
-    def __init__(self, state_size, action_size, random_seed, lr_actor, lr_critic, weight_decay=1e-4, future_discount=0.99,
+    def __init__(self, state_size, action_size, random_seed=0, lr_actor=1e-4, lr_critic=1e-4, weight_decay=1e-4, future_discount=0.99,
                  soft_update_rate=0.001, replay_buffer_size=1e6, replay_batch_size=120,
-                 add_noise=True):
+                 add_noise=True, use_two_mems=True, good_mem_ratio=0.2):
         """Initialize an Agent object.
         
         Params
@@ -47,30 +47,19 @@ class Agent():
         self.noise = OUNoise(action_size, random_seed)
 
         # Replay memory
-        self.memory = ReplayBuffer(action_size, replay_buffer_size, random_seed)
-        self.good_memory = ReplayBuffer(action_size, replay_buffer_size, random_seed)
+        self.memory = ReplayBuffer(action_size, replay_buffer_size, replay_batch_size, random_seed, use_two_mems, good_mem_ratio)
     
-    def step(self, state, action, reward, next_state, done, perform_learn=True):
+    def step(self, state, action, reward, next_state, done, perform_learn=True, uniform_sampling=False):
         """Save experience in replay memory, and use random sample from buffer to learn."""
         # Save experience / reward
-        if reward > 0:
-            self.good_memory.add(state, action, reward, next_state, done)
-        else:
-            self.memory.add(state, action, reward, next_state, done)
+        self.memory.add(state, action, reward, next_state, done)
 
         # Learn, if enough samples are available in memory
-        if perform_learn and (len(self.memory) + len(self.good_memory)) >= self.replay_batch_size:
-            num_good = min(len(self.good_memory), np.ceil(self.replay_batch_size*0.2).astype(np.uint32))
-            bad_experiences = self.memory.sample(self.replay_batch_size-num_good)
-            if num_good > 0:
-                good_experiences = self.good_memory.sample(num_good)
-                experiences = tuple(torch.cat((bad_experiences[i], good_experiences[i])) for i in range(5))
-            else:
-                experiences = bad_experiences
-
+        if perform_learn and len(self.memory) >= self.replay_batch_size:
+            experiences = self.memory.sample(uniform_sampling)
             self.learn(experiences)
 
-    def act(self, state):
+    def act(self, state, noise_sigma=0.1):
         """Returns actions for given state as per current policy."""
         state = torch.from_numpy(state).float().to(device)
         self.actor_local.eval()
@@ -78,8 +67,7 @@ class Agent():
             action = self.actor_local(state).cpu().data.numpy()
         self.actor_local.train()
         if self.add_noise:
-            noise = self.noise.sample()
-            action += noise
+            action += self.noise.sample(noise_sigma)
         return np.clip(action, -1, 1)
 
     def reset(self):
@@ -111,7 +99,7 @@ class Agent():
         # Minimize the loss
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic_local.parameters(), 1)
+        # torch.nn.utils.clip_grad_norm_(self.critic_local.parameters(), 1)
         self.critic_optimizer.step()
 
         # ---------------------------- update actor ---------------------------- #
@@ -143,47 +131,69 @@ class Agent():
 class OUNoise:
     """Ornstein-Uhlenbeck process."""
 
-    def __init__(self, size, seed, mu=0., theta=0.2, sigma=0.1):
+    def __init__(self, size, seed, mu=0., theta=0.2):
         """Initialize parameters and noise process."""
         self.mu = mu * np.ones(size)
         self.theta = theta
-        self.sigma = sigma
-        self.seed = random.seed(seed)
+        # self.seed = random.seed(seed)
+        self.seed = np.random.seed(seed)
         self.reset()
 
     def reset(self):
         """Reset the internal state (= noise) to mean (mu)."""
         self.state = copy.copy(self.mu)
 
-    def sample(self):
+    def sample(self, sigma=0.1):
         """Update internal state and return it as a noise sample."""
         x = self.state
-        dx = self.theta * (self.mu - x) + self.sigma * np.array([random.random() for i in range(len(x))])
+        # dx = self.theta * (self.mu - x) + sigma * np.array([random.random() for i in range(len(x))])
+        # Use Gaussian noise to ensure we can still rarely sample large steps
+        dx = self.theta * (self.mu - x) + np.random.normal(loc=0, scale=sigma, size=len(x))
         self.state = x + dx
         return self.state
 
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, replay_buffer_size, seed):
+    def __init__(self, action_size, replay_buffer_size, replay_batch_size, seed, use_two_mems=False, good_mem_ratio=0.2):
         """Initialize a ReplayBuffer object.
         Params
         ======
             replay_buffer_size (int): maximum size of buffer
         """
         self.action_size = action_size
+        self.replay_batch_size = replay_batch_size
         self.memory = deque(maxlen=replay_buffer_size)  # internal memory (deque)
+        self.good_memory = deque(maxlen=replay_buffer_size)  # internal memory (deque) for positive rewards
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
         self.seed = random.seed(seed)
+        self.use_two_mems = use_two_mems
+        self.good_mem_ratio = good_mem_ratio
     
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
         e = self.experience(state, action, reward, next_state, done)
-        self.memory.append(e)
+        if self.use_two_mems and reward > 0:
+            self.good_memory.append(e)
+        else:
+            self.memory.append(e)
     
-    def sample(self, replay_batch_size):
+    def sample(self, uniform_sampling=False):
         """Randomly sample a batch of experiences from memory."""
-        experiences = random.sample(self.memory, k=replay_batch_size)
+
+        if self.use_two_mems:
+            num_good = min(len(self.good_memory), np.ceil(self.replay_batch_size*self.good_mem_ratio).astype(np.uint32))
+        else:
+            num_good = 0
+
+        # Choose from bad experience memory
+        if uniform_sampling:
+            experiences = random.sample(self.memory + self.good_memory, k=self.replay_batch_size)
+        else:
+            experiences = random.sample(self.memory, k=self.replay_batch_size-num_good)
+            if num_good > 0:
+                # Choose from good experience memory
+                experiences += random.sample(self.good_memory, k=num_good)
 
         states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(device)
@@ -195,4 +205,4 @@ class ReplayBuffer:
 
     def __len__(self):
         """Return the current size of internal memory."""
-        return len(self.memory)
+        return len(self.memory) + len(self.good_memory)
